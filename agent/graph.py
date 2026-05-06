@@ -9,109 +9,146 @@ from pydantic import BaseModel
 from langgraph.graph import StateGraph, START
 from langgraph.prebuilt import tools_condition
 
-from langchain.messages import SystemMessage, ToolMessage, AIMessage
+from langchain.messages import (
+    SystemMessage,
+    ToolMessage,
+    AIMessage
+)
+
 from langchain.chat_models import init_chat_model
 
-from agent.tools import search_flights, search_hotels, get_activities, calc_budget
+from agent.tools import (
+    search_flights,
+    search_hotels,
+    get_activities,
+    calc_budget
+)
+
 from agent.state import Context
 
 
+# =========================================================
+# Structured extraction schema
+# =========================================================
+
 class TripInfo(BaseModel):
-    persons: int | str | None = None
-    budget: float | str | None = None
-    
+
+    persons: int | None = None
+    children: int | None = 0
+
+    budget: float | None = None
+
     place: str | None = None
     origin: str | None = None
-    
+
     arrival_date: str | None = None
     leave_date: str | None = None
-    
 
-def normalize_bool(value):
 
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, str):
-        return value.lower() == "true"
-
-    return False
+# =========================================================
+# Models
+# =========================================================
 
 model = init_chat_model(
-    model=f'groq:{os.getenv('GROQ_MODEL')}'
+    model=f"groq:{os.getenv('GROQ_MODEL')}"
 )
 
-extractor = model.with_structured_output(TripInfo)
+extractor = model.with_structured_output(
+    TripInfo
+)
 
-model_with_tools = model.bind_tools([search_flights, search_hotels, get_activities, calc_budget])
+model_with_tools = model.bind_tools(
+    [
+        search_flights,
+        search_hotels,
+        get_activities,
+        calc_budget
+    ]
+)
+
+
+# =========================================================
+# LLM Node
+# =========================================================
 
 def llm_call(state: Context):
-    """LLM decides whether to call a tool or not"""
 
-    if state.get('llm_calls', 0) > 5:
+    if state.get("llm_calls", 0) > 5:
+
         return {
-            'messages': [
-                AIMessage("Maxtool iterations reached.")
+            "messages": [
+                AIMessage(
+                    content="Max tool iterations reached."
+                )
             ]
         }
-    return {
-        "messages": [
-            model_with_tools.invoke(
-                [
-                    SystemMessage(
-                        content="""
-                        You are a professional vacation planner.
 
-                        Rules:
-                        - Always respond in the user's language.
-                        - Never invent travel information.
-                        - Use only information available in the current state.
-                        - Use tools only when necessary.
-                        - Present flight and hotel results in markdown tables.
-                        - If required information is missing, ask concise follow-up questions.
-                        - Never call tools repeatedly with the same parameters.
-                        - Do not calculate budgets unless the user explicitly asks for total costs or budgeting.
-                        - After completing the requested task, stop and provide the final answer immediately.
-                        - Never suggest hotels, activities or budgeting unless explicitly requested.
-                        """
-                    ),
-                ]
-                + state["messages"]
+    response = model_with_tools.invoke(
+        [
+            SystemMessage(
+                content=f"""
+            You are a professional vacation planner.
+
+            Flights:
+            {state.get("flights")}
+
+            Hotels:
+            {state.get("hotels")}
+
+            Activities:
+            {state.get("activities")}
+
+            Budget:
+            {state.get("budget")}
+
+            Rules:
+            - Never say data is unavailable if data exists
+            - Use markdown tables
+            - Use ONLY the data provided
+            - If flights already exist in the state, do not call search_flights again
+            - If hotels already exist in the state, do not call search_hotels again
+            - If activities already exist in the state, do not call get_activities again
+            - If enough information exists to answer the user, answer directly
+            """
             )
-        ],
-        "llm_calls": state.get('llm_calls', 0) + 1
+        ]
+        + state["messages"]
+    )
+
+    return {
+        "messages": [response],
+        "llm_calls": state.get("llm_calls", 0) + 1
     }
 
-tools_by_name = {tool.name: tool for tool in [search_flights, search_hotels, get_activities, calc_budget]}
 
+# =========================================================
+# Extractor Node
+# =========================================================
 
 def extract_trip_info(state: Context):
 
     last_message = state["messages"][-1].content
 
-    extracted = extractor.invoke(f"""
-    Extract travel information from this message.
+    extracted = extractor.invoke(
+            f"""
+            Extract travel information from this message.
 
-    Rules:
-    - Return numbers as numbers, not strings
-    - Dates must use YYYY-MM-DD format
+            Rules:
+            - Return numbers as numbers
+            - Dates must use YYYY-MM-DD format
 
-    Today is {date.today()}.
+            Today is {date.today()}.
 
-    Message:
-    {last_message}
-    """)
-
-    persons = extracted.persons
-    budget = extracted.budget
-
-    if isinstance(persons, str):
-        persons = int(persons)
-
-    if isinstance(budget, str):
-        budget = float(budget)
+            Message:
+            {last_message}
+            """
+    )
 
     message = last_message.lower()
+
+    # ------------------------------------
+    # Intent detection
+    # ------------------------------------
 
     wants_flights = any(
         word in message
@@ -127,7 +164,11 @@ def extract_trip_info(state: Context):
         word in message
         for word in [
             "hotel",
-            "hoteles"
+            "hoteles",
+            "estancia",
+            "hospedaje",
+            "alojamiento",
+            "airbnb"
         ]
     )
 
@@ -140,6 +181,10 @@ def extract_trip_info(state: Context):
             "things to do"
         ]
     )
+
+    # ------------------------------------
+    # Fix inverted dates
+    # ------------------------------------
 
     arrival = extracted.arrival_date
     leave = extracted.leave_date
@@ -154,11 +199,18 @@ def extract_trip_info(state: Context):
 
     updates = {}
 
-    if persons is not None:
-        updates["persons"] = persons
+    # ------------------------------------
+    # Persist extracted fields
+    # ------------------------------------
 
-    if budget is not None:
-        updates["budget"] = budget
+    if extracted.persons is not None:
+        updates["persons"] = extracted.persons
+
+    if extracted.children is not None:
+        updates["children"] = extracted.children
+
+    if extracted.budget is not None:
+        updates["budget"] = extracted.budget
 
     if extracted.place:
         updates["place"] = extracted.place
@@ -180,102 +232,241 @@ def extract_trip_info(state: Context):
 
     return updates
 
+
+# =========================================================
+# Tools Node
+# =========================================================
+
+tools_by_name = {
+    tool.name: tool
+    for tool in [
+        search_flights,
+        search_hotels,
+        get_activities,
+        calc_budget
+    ]
+}
+
+
 def tools(state: Context):
 
     result = []
+    updates = {}
 
-    for tool_call in state['messages'][-1].tool_calls:
+    for tool_call in state["messages"][-1].tool_calls:
 
-        tool = tools_by_name[tool_call['name']]
+        tool = tools_by_name[
+            tool_call["name"]
+        ]
 
-        args = dict(tool_call['args'])
-
-        # -------------------------
+        # =================================================
         # Flights
-        # -------------------------
+        # =================================================
 
-        if tool.name == 'search_flights':
+        if tool.name == "search_flights":
 
-            args['arrival_date'] = state['arrival_date']
-            args['leave_date'] = state['leave_date']
-            args['passengers'] = state['persons']
-            args['destination'] = state['place']
-            args['current_location'] = state['origin']
+            args = {
+                "passengers": state["persons"],
+                "origin": state["origin"],
+                "destination": state["place"],
+                "arrival_date": state["arrival_date"],
+                "leave_date": state["leave_date"],
+                "type_of_flight": "Redondo"
+            }
 
-        # -------------------------
+        # =================================================
         # Hotels
-        # -------------------------
+        # =================================================
 
-        if tool.name == 'search_hotels':
+        elif tool.name == "search_hotels":
 
             if not state.get("wants_hotels"):
 
                 result.append(
                     ToolMessage(
                         content="Hotel search was not requested.",
-                        tool_call_id=tool_call['id']
+                        tool_call_id=tool_call["id"]
                     )
                 )
 
                 continue
 
-            args['place'] = state['place']
-            args['check_in_date'] = state['arrival_date']
-            args['check_out_date'] = state['leave_date']
-            args['adults'] = state['persons']
-            args['children'] = 0
+            args = {
+                "place": state["place"],
+                "check_in_date": state["arrival_date"],
+                "check_out_date": state["leave_date"],
+                "adults": state["persons"],
+                "children": state.get("children", 0)
+            }
 
-        # -------------------------
+        # =================================================
         # Activities
-        # -------------------------
+        # =================================================
 
-        if tool.name == 'get_activities':
+        elif tool.name == "get_activities":
 
             if not state.get("wants_activities"):
 
                 result.append(
                     ToolMessage(
                         content="Activities search was not requested.",
-                        tool_call_id=tool_call['id']
+                        tool_call_id=tool_call["id"]
                     )
                 )
 
                 continue
 
-            args['place'] = state['place']
+            args = {
+                "place": state["place"]
+            }
 
-        # -------------------------
-        # Execute tool
-        # -------------------------
+        # =================================================
+        # Budget
+        # =================================================
+
+        elif tool.name == "calc_budget":
+
+            flights = state.get("flights", [])
+            hotels = state.get("hotels", [])
+            activities = state.get("activities", [])
+
+            cheapest_flight = (
+                min(f.price for f in flights)
+                if flights
+                else 0
+            )
+
+            cheapest_hotel = (
+                min(
+                    h.price_per_night
+                    for h in hotels
+                    if h.price_per_night
+                )
+                if hotels
+                else 0
+            )
+
+            activities_total = (
+                sum(a.price_per_person for a in activities)
+                if activities
+                else 0
+            )
+
+            arrival = date.fromisoformat(
+                state["arrival_date"]
+            )
+
+            leave = date.fromisoformat(
+                state["leave_date"]
+            )
+
+            nights = (leave - arrival).days
+
+            args = {
+                "price_hotel": cheapest_hotel,
+                "price_flight": cheapest_flight,
+                "price_activities": activities_total,
+                "persons": state["persons"],
+                "nights": nights
+            }
+
+        else:
+            continue
 
         print("TOOL:", tool.name)
         print("ARGS:", args)
 
         try:
+
             observation = tool.invoke(args)
+
+            # =====================================
+            # SAVE RESULTS INTO STATE
+            # =====================================
+
+            if tool.name == "search_flights":
+                updates["flights"] = observation
+
+            elif tool.name == "search_hotels":
+                updates["hotels"] = observation
+
+            elif tool.name == "get_activities":
+                updates["activities"] = observation
+                
 
         except Exception as e:
 
+            print("TOOL ERROR:", e)
+
             observation = f"Tool error: {str(e)}"
+
+        # =========================================
+        # CLEAN TOOL MESSAGE
+        # =========================================
+
+        if isinstance(observation, list):
+
+            content = "\n".join(
+                [
+                    item.model_dump_json(indent=2)
+                    for item in observation
+                ]
+            )
+
+        else:
+            content = str(observation)
 
         result.append(
             ToolMessage(
-                content=str(observation),
-                tool_call_id=tool_call['id']
+                content=content,
+                tool_call_id=tool_call["id"]
             )
         )
 
-    return {"messages": result}
+    updates["messages"] = result
+
+    return updates
+
+
+# =========================================================
+# Graph
+# =========================================================
 
 agent_builder = StateGraph(Context)
 
-agent_builder.add_node('llm_call', llm_call)
-agent_builder.add_node('extract_trip_info', extract_trip_info)
-agent_builder.add_node('tools', tools)
+agent_builder.add_node(
+    "extract_trip_info",
+    extract_trip_info
+)
 
-agent_builder.add_conditional_edges('llm_call', tools_condition)
-agent_builder.add_edge(START, 'extract_trip_info')
-agent_builder.add_edge('extract_trip_info', 'llm_call')
-agent_builder.add_edge('tools', 'llm_call')
+agent_builder.add_node(
+    "llm_call",
+    llm_call
+)
+
+agent_builder.add_node(
+    "tools",
+    tools
+)
+
+agent_builder.add_edge(
+    START,
+    "extract_trip_info"
+)
+
+agent_builder.add_edge(
+    "extract_trip_info",
+    "llm_call"
+)
+
+agent_builder.add_conditional_edges(
+    "llm_call",
+    tools_condition
+)
+
+agent_builder.add_edge(
+    "tools",
+    "llm_call"
+)
 
 agent = agent_builder.compile()

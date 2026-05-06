@@ -15,7 +15,7 @@ result = agent.invoke(
         "messages": [
             HumanMessage(
                 content="""
-                Busca vuelos y estancia para 2 personas
+                Busca vuelos y hotel para 2 personas y 1 niño
                 de Monterrey a Oaxaca
                 del 15 al 20 de junio
                 con presupuesto de 15 mil pesos

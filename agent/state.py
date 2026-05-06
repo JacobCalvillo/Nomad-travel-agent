@@ -4,6 +4,7 @@ from langgraph.graph.message import add_messages
 
 class Context(TypedDict, total=False):
     persons: int
+    children: int
     budget: float
     place: str
     origin: str

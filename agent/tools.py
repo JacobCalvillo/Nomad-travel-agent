@@ -3,6 +3,8 @@ import httpx
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
+
 
 from datetime import date
 import airportsdata
@@ -30,8 +32,8 @@ class GetActivitiesResponse(BaseModel):
 
 class SearchHotelsResponse(BaseModel):
     name: str = Field(description='Name of the hotel')
-    price_per_night: float = Field(decimal_places=2, description='Price per night of the hotel.')
-    stars: float = Field(decimal_places=1, description='Calification of the Hotel in scale of 1 to 5')
+    price_per_night: float = Field(description='Price per night of the hotel.')
+    stars: float = Field(description='Calification of the Hotel in scale of 1 to 5')
     amenities: list[str] = Field(description='Amenities and commodities of the hotel')
 
 class BudgetInput(BaseModel):
@@ -66,7 +68,9 @@ def get_airport_code(city: str) -> AirportCodeResponse:
     raise ValueError(f'No airport found for city: {city}')
 
 @tool('search_flights', description='Performs search of flights in multiple sites. Use it when you need to know fligths')
-def search_flights(passengers:int, departure_id:str, arrival_id:str, arrival_date: date, leave_date: date | None, type_of_flight:str) -> list[SearchFlightsResponse]:
+def search_flights(passengers:int | str, origin:str, destination:str, arrival_date: date, leave_date: date | None, type_of_flight:str = 'Redondo') -> list[SearchFlightsResponse]:
+
+    passengers = int(passengers)
 
     if isinstance(arrival_date, str):
         arrival_date = date.fromisoformat(arrival_date)
@@ -84,14 +88,14 @@ def search_flights(passengers:int, departure_id:str, arrival_id:str, arrival_dat
         case _:
             type_of_flight = '1'
     
-    print("TOOL INPUT:", departure_id, arrival_id)
+    print("TOOL INPUT:", origin, destination)
     
     departure = get_airport_code.invoke({
-        "city": departure_id
+        "city": origin
     })
 
     arrival = get_airport_code.invoke({
-        "city": arrival_id
+        "city": destination
     })
 
     departure_code = departure.airport_code
@@ -164,17 +168,26 @@ def search_hotels(place:str, check_in_date: str, check_out_date:str, adults: int
         "api_key": os.getenv("SER_API_API_KEY")
     }
     
+    if children > 0:
+        params["children_ages"] = ",".join(
+            ["5"] * children
+        )
+    
     r = httpx.get('https://serpapi.com/search',params=params)
     
     response = r.json()
     
     hotels: list[SearchHotelsResponse] = []
     
-    for hotel in response.get('properties', []):
+    for hotel in response.get('properties', [])[:5]:
+        
+        price_str = hotel.get('rate_per_night', {}).get('lowest', '0')
+        price = float(price_str.replace('MX$', '').replace(',', '').strip())
+        
         hotels.append(
             SearchHotelsResponse(
                 name=hotel.get('name'),
-                price_per_night=hotel.get('rate_per_night', {}).get('lowest'),
+                price_per_night=price,
                 stars=hotel.get('overall_rating'),
                 amenities=hotel.get('amenities', [])
             )
@@ -190,10 +203,7 @@ def get_activities(place: str) -> list[GetActivitiesResponse]:
         {"name": "Mercado 20 de Noviembre", "price_per_person": 0.0, "duration": "2h", "category": "free", 'description': 'some description.'},
     ]
 
-@tool(
-    'calc_budget',
-    description="Compute total travel budget"
-)
+@tool('calc_budget',description="Compute total travel budget")
 def calc_budget(
     price_hotel: float,
     price_flight: float,
