@@ -33,8 +33,8 @@ from agent.state import Context
 
 class TripInfo(BaseModel):
 
-    persons: int | None = None
-    children: int | None = 0
+    persons: int = 1
+    children: int = 0
 
     budget: float | None = None
 
@@ -266,7 +266,7 @@ def tools(state: Context):
         if tool.name == "search_flights":
 
             args = {
-                "passengers": state["persons"],
+                "passengers": state.get('persons', 1),
                 "origin": state["origin"],
                 "destination": state["place"],
                 "arrival_date": state["arrival_date"],
@@ -295,7 +295,7 @@ def tools(state: Context):
                 "place": state["place"],
                 "check_in_date": state["arrival_date"],
                 "check_out_date": state["leave_date"],
-                "adults": state["persons"],
+                "adults": state.get('persons', 1),
                 "children": state.get("children", 0)
             }
 
@@ -366,7 +366,7 @@ def tools(state: Context):
                 "price_hotel": cheapest_hotel,
                 "price_flight": cheapest_flight,
                 "price_activities": activities_total,
-                "persons": state["persons"],
+                "persons": state.get('persons', 1),
                 "nights": nights
             }
 

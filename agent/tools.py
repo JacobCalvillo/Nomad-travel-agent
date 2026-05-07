@@ -205,16 +205,16 @@ def get_activities(place: str) -> list[GetActivitiesResponse]:
 
 @tool('calc_budget',description="Compute total travel budget")
 def calc_budget(
-    price_hotel: float,
-    price_flight: float,
-    price_activities: float,
-    persons: int,
-    nights: int
+    price_hotel: float | str,
+    price_flight: float | str,
+    price_activities: float | str,
+    persons: int | str,
+    nights: int | str
 ) -> float:
 
     return (
-        (price_activities * persons)
-        + (price_flight * persons)
-        + (price_hotel * nights)
+        (float(price_activities) * int(persons))
+        + (float(price_flight) * int(persons))
+        + (float(price_hotel) * int(nights))
     )
 
