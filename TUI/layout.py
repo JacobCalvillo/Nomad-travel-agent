@@ -1,4 +1,6 @@
 import traceback
+import re
+import logging
 
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Header, Footer
@@ -10,8 +12,8 @@ from langchain.messages import HumanMessage, AIMessage
 from TUI.widgets import ChatMessage
 from agent.graph import agent
 
-import logging 
 logging.basicConfig(filename='travel_agent.log', level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class TravelAgentApp(App):
     CSS_PATH = "styles.tcss"
@@ -40,28 +42,27 @@ class TravelAgentApp(App):
         chat = self.query_one("#chat-container")
         chat.scroll_end(animate=False)
 
-    def add_user_message(self, message: str):
-        chat = self.query_one("#chat-container")
-        self.call_after_refresh(
-            lambda: chat.mount(ChatMessage(message, role="user"))
-        )
-        self.call_after_refresh(self.scroll_to_bottom)
-
-    def add_assistant_message(self, message: str):
-        chat = self.query_one("#chat-container")
-        self.call_after_refresh(
-            lambda: chat.mount(ChatMessage(message, role="assistant"))
-        )
-        self.call_after_refresh(self.scroll_to_bottom)
-
-    def add_status_message(self, message: str):
+    def add_message(self, message: str, role: str = "assistant"):
+        """Método genérico para añadir mensajes al chat."""
         if not message:
             return
         chat = self.query_one("#chat-container")
         self.call_after_refresh(
-            lambda: chat.mount(ChatMessage(message, role="status"))
+            lambda: chat.mount(ChatMessage(message, role=role))
         )
         self.call_after_refresh(self.scroll_to_bottom)
+
+    def add_user_message(self, message: str):
+        """Añade un mensaje del usuario."""
+        self.add_message(message, role="user")
+
+    def add_assistant_message(self, message: str):
+        """Añade un mensaje del asistente."""
+        self.add_message(message, role="assistant")
+
+    def add_status_message(self, message: str):
+        """Añade un mensaje de estado."""
+        self.add_message(message, role="status")
 
     def set_loading(self, loading: bool):
         self.query_one(Input).disabled = loading
@@ -154,7 +155,6 @@ class TravelAgentApp(App):
                 return
 
             # Limpiar tags <think> de modelos como DeepSeek/Qwen
-            import re
             response = re.sub(
                 r"<think>.*?</think>", "", last_ai_message, flags=re.DOTALL
             ).strip()

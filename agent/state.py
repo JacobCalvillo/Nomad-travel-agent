@@ -1,12 +1,6 @@
-from typing import Annotated
+from typing import Annotated, TYPE_CHECKING
 from langgraph.graph.message import add_messages
 
-from pydantic import BaseModel
-
-
-# Importaciones diferidas para evitar dependencia circular
-# (tools.py importa desde aquí, graph.py importa ambos)
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent.tools import (
         SearchFlightsResponse,

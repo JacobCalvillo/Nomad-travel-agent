@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import date
 
 from dotenv import load_dotenv
@@ -12,6 +13,8 @@ from langchain.messages import SystemMessage, AIMessage, HumanMessage
 
 from agent.tools import search_flights, search_hotels, get_activities, calc_budget
 from agent.state import Context
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
@@ -136,7 +139,7 @@ def extract_trip_info(state: Context) -> dict:
     updates["wants_hotels"] = extracted.wants_hotels
     updates["wants_activities"] = extracted.wants_activities
 
-    print("EXTRACTED:", updates)
+    logger.debug(f"EXTRACTED: {updates}")
     return updates
 
 

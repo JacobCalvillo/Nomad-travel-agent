@@ -70,7 +70,8 @@ def search_flights(
     leave_date: date | str | None,
     type_of_flight: str = "Redondo",
 ) -> list[SearchFlightsResponse]:
-    passengers = int(passengers)
+    if isinstance(passengers, str):
+        passengers = int(passengers)
 
     if isinstance(arrival_date, str):
         arrival_date = date.fromisoformat(arrival_date)
@@ -181,7 +182,7 @@ def search_hotels(
             .replace('\u202f', "")
             .strip() or 0
         )
-        currency = currency = response.get("search_parameters", {}).get("currency", "USD")
+        currency = response.get("search_parameters", {}).get("currency", "USD")
         if currency == "USD":
             price = price * 17.5
 
