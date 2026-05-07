@@ -1,72 +1,119 @@
+
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Input, Header, Footer, Button
-from textual.containers import Horizontal
+from textual.widgets import Input, Header, Footer
+from textual.containers import VerticalScroll
 from textual import work
 
 from langchain.messages import HumanMessage
 
+from TUI.widgets import ChatMessage
 from agent.graph import agent
 
 
-
 class TravelAgentApp(App):
-    
+    CSS_PATH = "styles.tcss"
+
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield RichLog(markup=True)
-        with Horizontal():
-            yield Input(placeholder="Escribe tu mensaje...", id='message')
-            yield Button("Enviar")
+        yield VerticalScroll(id="chat-container")
+        yield Input(placeholder="Ask anything...",id="message")
         yield Footer()
-    
+
     def on_mount(self) -> None:
         self.history = []
         self.agent_state = {}
+
         self.last_status = None
         self.agent_running = False
+
+        self.add_assistant_message("Hola, ¿a dónde quieres viajar?")
+
+    # =====================================================
+    # UI HELPERS
+    # =====================================================
+
+    def scroll_to_bottom(self):
+        chat = self.query_one("#chat-container")
+        chat.scroll_end(animate=False)
+
+    def add_user_message(self,message: str):
+        chat = self.query_one("#chat-container")
+
+        self.call_after_refresh(
+            lambda: chat.mount(
+                ChatMessage(
+                    message,
+                    role="user"
+                )
+            )
+        )
+        self.call_after_refresh(self.scroll_to_bottom)
+
+    def add_assistant_message(self,message: str):
+        chat = self.query_one("#chat-container")
+
+        self.call_after_refresh(lambda: chat.mount(ChatMessage(message,role="assistant")))
+        self.call_after_refresh(self.scroll_to_bottom)
+
+    def add_status_message(self,message: str):
+        chat = self.query_one("#chat-container")
+
+        self.call_after_refresh(
+            lambda: chat.mount(
+                ChatMessage(message,role="status")))
         
-        
-        log = self.query_one(RichLog)
-        log.write("[orange1] Hola, ¿a dónde quieres viajar?[/orange1]")
-        
-        
-    def on_button_pressed(self, event: Button.Pressed):
-        message = self.query_one('#message', Input).value
+        self.call_after_refresh(self.scroll_to_bottom)
+
+    def set_loading(self,loading: bool):
+        self.query_one(Input).disabled = loading
+
+    # =====================================================
+    # EVENTS
+    # =====================================================
+
+    def on_input_submitted(self,event: Input.Submitted) -> None:
+        message = self.query_one("#message",Input).value
         self.send_message(message)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        message = self.query_one('#message', Input).value
-        self.send_message(message)
-        
-    def send_message(self, message: str) -> None:
+    # =====================================================
+    # SEND MESSAGE
+    # =====================================================
+
+    def send_message(self,message: str) -> None:
         if self.agent_running:
+            self.add_status_message("Espera a que termine la búsqueda actual...")
             return
-        
+
         message = message.strip()
-        
+
         if not message:
             return
-        
-        log = self.query_one(RichLog)
-        log.write(f"Tú: {message}")
-        self.query_one('#message', Input).clear()
+
+        self.add_user_message(message)
+        self.query_one("#message",Input).clear()
         self.run_agent(message)
-    
+
+    # =====================================================
+    # AGENT
+    # =====================================================
+
     @work(thread=True)
-    def run_agent(self, message: str) -> None:
+    def run_agent(self,message: str) -> None:
+
         self.agent_running = True
+        self.call_from_thread(self.set_loading,True)
         self.last_status = None
 
         TOOL_MESSAGES = {
             "search_flights": "Buscando vuelos...",
             "search_hotels": "Buscando hoteles...",
             "get_activities": "Buscando actividades...",
-            "calc_budget": "Calculando presupuesto...",
+            "calc_budget": "Calculando presupuesto..."
         }
 
-        pending_history = [*self.history, HumanMessage(message)]
+        pending_history = [*self.history,HumanMessage(message)]
 
         input_state = {
             **self.agent_state,
@@ -79,22 +126,20 @@ class TravelAgentApp(App):
         try:
             for chunk in agent.stream(input_state,stream_mode="values"):
                 final_state = chunk
-                messages = chunk.get("messages", [])
+                messages = chunk.get("messages",[])
 
                 if not messages:
                     continue
-                
+
                 last_message = messages[-1]
-                if getattr(last_message, "tool_calls", None):
+
+                if getattr(last_message,"tool_calls",None):
                     for tc in last_message.tool_calls:
-                        status = TOOL_MESSAGES.get(
-                            tc["name"],
-                            f"⚙ {tc['name']}..."
-                        )
+                        status = TOOL_MESSAGES.get(tc["name"],f"Running {tc['name']}...")
+
                         if status != self.last_status:
                             self.last_status = status
-                            self.call_from_thread(self._write_status, status)
-
+                            self.call_from_thread(self.add_status_message,status)
 
             if not final_state:
                 return
@@ -106,26 +151,34 @@ class TravelAgentApp(App):
             }
 
             self.history = final_state["messages"]
-            respuesta = (final_state["messages"][-1].content)
+            response = final_state["messages"][-1].content
 
-            self.call_from_thread(self._write_response,respuesta)
+            if "<think>" in response:
+                import re
+
+                response = re.sub(
+                    r"<think>.*?</think>",
+                    "",
+                    response,
+                    flags=re.DOTALL
+                ).strip()
+
+            self.call_from_thread(self.add_assistant_message,response)
 
         except Exception as e:
-            self.call_from_thread(
-                self._write_response,
-                f"[red]Error:[/red] {str(e)}"
-            )
+            self.call_from_thread(self.add_assistant_message,f"Error: {str(e)}")
+
         finally:
             self.agent_running = False
-        
-    def _write_response(self, respuesta:str) -> None:
-        log = self.query_one(RichLog)
-        log.write(f"[orange1] {respuesta}[/orange1]")
+            self.call_from_thread(self.set_loading,False)
 
-    def _write_status(self, status: str) -> None:
-        log = self.query_one(RichLog)
-        log.write(f"[dim italic]{status}[/dim italic]")
+    # =====================================================
+    # ACTIONS
+    # =====================================================
 
-    
     def action_toggle_dark(self) -> None:
-        self.theme = ('textual-dark' if self.theme == 'textual-light' else 'textual-light')
+        self.theme = (
+            "textual-dark"
+            if self.theme == "textual-light"
+            else "textual-light"
+        )

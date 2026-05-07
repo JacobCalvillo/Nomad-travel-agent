@@ -30,69 +30,18 @@ class TripInfo(BaseModel):
     arrival_date: str | None = None
     leave_date: str | None = None
 
+    wants_flights: bool = False
+    wants_hotels: bool = False
+    wants_activities: bool = False
+
 
 # =========================================================
 # Models
 # =========================================================
 
-model = init_chat_model(
-    model=f"groq:{os.getenv('GROQ_MODEL')}"
-)
+model = init_chat_model(model=f"groq:{os.getenv('GROQ_MODEL')}")
 
 extractor = model.with_structured_output(TripInfo)
-
-
-# =========================================================
-# LEGACY
-# =========================================================
-
-# def llm_call(state: Context):
-#     if state.get("llm_calls", 0) > 5:
-#         return {
-#             "messages": [
-#                 AIMessage(
-#                     content="Max tool iterations reached."
-#                 )
-#             ]
-#         }
-
-#     response = model.invoke(
-#         [
-#             SystemMessage(
-#                 content=f"""
-#             You are a professional vacation planner.
-
-#             Flights:
-#             {state.get("flights")}
-
-#             Hotels:
-#             {state.get("hotels")}
-
-#             Activities:
-#             {state.get("activities")}
-
-#             Budget:
-#             {state.get("budget")}
-
-#             Rules:
-#             - Never say data is unavailable if data exists
-#             - Use markdown tables
-#             - Use ONLY the data provided
-#             - If flights already exist in the state, do not call search_flights again
-#             - If hotels already exist in the state, do not call search_hotels again
-#             - If activities already exist in the state, do not call get_activities again
-#             - If enough information exists to answer the user, answer directly
-#             """
-#             )
-#         ]
-#         + state["messages"]
-#     )
-
-#     return {
-#         "messages": [response],
-#         "llm_calls": state.get("llm_calls", 0) + 1
-#     }
-
 
 # =========================================================
 # Extractor Node
@@ -100,58 +49,48 @@ extractor = model.with_structured_output(TripInfo)
 
 def extract_trip_info(state: Context):
     last_message = state["messages"][-1].content
-    extracted = extractor.invoke(
-            f"""
-            Extract travel information from this message.
+    
+    try:
+        extracted = extractor.invoke(
+                f"""
+                Extract travel information from this message.
+                If the user refers to something already established (e.g., "solo yo", "el mismo día"), 
+                use the current trip state to fill in the values — don't leave them null.
 
-            Rules:
-            - Return numbers as numbers
-            - Dates must use YYYY-MM-DD format
+                Rules:
+                - Return numbers as numbers
+                - Dates must use YYYY-MM-DD format
+                - "solo yo" or "para mí solo" means persons=1
+                - "el mismo dia" means use the same arrival_date from current state
 
-            Today is {date.today()}.
+                Today is {date.today()}.
 
-            Message:
-            {last_message}
-            """
-    )
+                Current trip state:
+                Origin: {state.get("origin")}
+                Destination: {state.get("place")}
+                Arrival date: {state.get("arrival_date")}
+                Leave date: {state.get("leave_date")}
+                Budget: {state.get("budget")}
+                Persons: {state.get("persons")}
+                Children: {state.get("children")}
 
-    message = last_message.lower()
+                User message: {last_message}
+                """
+            )
+    except Exception:
+        extracted = TripInfo(
+            persons=state.get("persons", 1),
+            children=state.get("children", 0),
+            budget=state.get("budget"),
+            place=state.get("place"),
+            origin=state.get("origin"),
+            arrival_date=state.get("arrival_date"),
+            leave_date=state.get("leave_date"),
+            wants_flights=False,
+            wants_hotels=False,
+            wants_activities=False,
+        )
 
-    # ------------------------------------
-    # Intent detection
-    # ------------------------------------
-
-    wants_flights = any(
-        word in message
-        for word in [
-            "vuelo",
-            "vuelos",
-            "flight",
-            "flights"
-        ]
-    )
-
-    wants_hotels = any(
-        word in message
-        for word in [
-            "hotel",
-            "hoteles",
-            "estancia",
-            "hospedaje",
-            "alojamiento",
-            "airbnb"
-        ]
-    )
-
-    wants_activities = any(
-        word in message
-        for word in [
-            "actividad",
-            "actividades",
-            "hacer",
-            "things to do"
-        ]
-    )
 
     # ------------------------------------
     # Fix inverted dates
@@ -161,7 +100,6 @@ def extract_trip_info(state: Context):
     leave = extracted.leave_date
 
     if arrival and leave:
-
         arrival_date = date.fromisoformat(arrival)
         leave_date = date.fromisoformat(leave)
 
@@ -195,31 +133,15 @@ def extract_trip_info(state: Context):
     if leave:
         updates["leave_date"] = leave
 
-    updates["wants_flights"] = wants_flights
-    updates["wants_hotels"] = wants_hotels
-    updates["wants_activities"] = wants_activities
+    updates["wants_flights"] = extracted.wants_flights
+    updates["wants_hotels"] = extracted.wants_hotels
+    updates["wants_activities"] = extracted.wants_activities
 
     print("EXTRACTED:", updates)
 
     return updates
 
-
-# =========================================================
-# LEGACY
-# =========================================================
-
-# tools_by_name = {
-#     tool.name: tool
-#     for tool in [
-#         search_flights,
-#         search_hotels,
-#         get_activities,
-#         calc_budget
-#     ]
-# }
-
 def response_node(state: Context):
-
     flights = state.get("flights", [])
     hotels = state.get("hotels", [])
     activities = state.get("activities", [])
@@ -251,7 +173,6 @@ def response_node(state: Context):
                 - If some information is missing, mention it clearly
             """
     
-    
     response = model.invoke([
         SystemMessage(
             content="""
@@ -278,12 +199,17 @@ def response_node(state: Context):
     }
 
 def flight_node(state: Context):
+    if not state.get('arrival_date'):
+        return {
+            'messages': [AIMessage(content="Que fechas deseas para el vuelo?")]
+        }
+    
     flights = search_flights.invoke({
         "passengers": state["persons"],
         "origin": state["origin"],
         "destination": state["place"],
         "arrival_date": state["arrival_date"],
-        "leave_date": state["leave_date"],
+        "leave_date": state.get('leave_date'),
         "type_of_flight": "Redondo"
     })
 
@@ -292,6 +218,11 @@ def flight_node(state: Context):
     }
     
 def hotel_node(state: Context):
+    if not state.get("arrival_date") or not state.get("leave_date"):
+        return {
+            "messages": [AIMessage(content="¿Qué fechas deseas para el hospedaje?")]
+        }
+    
     hotels = search_hotels.invoke({
         "place": state["place"],
         "check_in_date": state["arrival_date"],
@@ -305,9 +236,7 @@ def hotel_node(state: Context):
     }
 
 def activity_node(state: Context):
-    activities = get_activities.invoke({
-        "place": state["place"]
-    })
+    activities = get_activities.invoke({"place": state["place"]})
 
     return {
         "activities": activities
@@ -319,33 +248,15 @@ def budget_node(state:Context):
     hotels = state.get("hotels", [])
     activities = state.get("activities", [])
 
-    cheapest_flight = min(
-        [f.price for f in flights],
-        default=0
-    )
-
-    cheapest_hotel = min(
-        [h.price_per_night for h in hotels],
-        default=0
-    )
-
-    activities_total = sum(
-        a.price_per_person
-        for a in activities
-    ) if activities else 0
+    cheapest_flight = min([f.price for f in flights],default=0)
+    cheapest_hotel = min([h.price_per_night for h in hotels],default=0)
+    activities_total = sum(a.price_per_person for a in activities) if activities else 0
 
     nights = 0
 
     if state.get("arrival_date") and state.get("leave_date"):
-
-        arrival = date.fromisoformat(
-            state["arrival_date"]
-        )
-
-        leave = date.fromisoformat(
-            state["leave_date"]
-        )
-
+        arrival = date.fromisoformat(state["arrival_date"])
+        leave = date.fromisoformat(state["leave_date"])
         nights = (leave - arrival).days
 
     total = calc_budget.invoke({

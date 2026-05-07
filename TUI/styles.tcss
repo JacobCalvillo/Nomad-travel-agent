@@ -1,0 +1,40 @@
+Screen {
+    background: #0d1117;
+    color: #e6edf3;
+}
+
+#chat-container {
+    padding: 1 2;
+}
+
+.message {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.user {
+    color: #7ee787;
+    text-style: bold;
+}
+
+.assistant {
+    color: #e6edf3;
+}
+
+.status {
+    color: #8b949e;
+    text-style: italic;
+}
+
+Input {
+    dock: bottom;
+    height: 3;
+    margin: 1 2;
+    background: #161b22;
+    border: solid #30363d;
+    color: white;
+}
+
+Footer {
+    background: #161b22;
+}
