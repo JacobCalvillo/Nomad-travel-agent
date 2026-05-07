@@ -12,18 +12,36 @@ Screen {
     margin: 0 0 1 0;
 }
 
-.user {
+.user .user-text {
     color: #7ee787;
     text-style: bold;
 }
 
-.assistant {
+.status .status-text {
+    color: #8b949e;
+    text-style: italic;
+}
+
+.assistant Markdown {
+    background: transparent;
+    padding: 0;
+    margin: 0;
     color: #e6edf3;
 }
 
-.status {
-    color: #8b949e;
-    text-style: italic;
+.assistant MarkdownTableHead {
+    background: #21262d;
+    color: #e6edf3;
+    text-style: bold;
+}
+
+.assistant MarkdownTableRow {
+    background: #161b22;
+    color: #e6edf3;
+}
+
+.assistant MarkdownTableRow.-even {
+    background: #0d1117;
 }
 
 Input {
