@@ -184,8 +184,10 @@ def search_hotels(
         )
         currency = response.get("search_parameters", {}).get("currency", "USD")
         if currency == "USD":
-            price = price * 17.5
-
+            price = price * 17.5  
+            
+            
+    
         hotels.append(
             SearchHotelsResponse(
                 name=hotel.get("name", "Sin nombre"),
