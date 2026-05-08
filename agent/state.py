@@ -13,9 +13,11 @@ class Context(TypedDict, total=False):
     # Presupuesto indicado por el usuario
     budget: float
 
-    # Destino
+    # Destino y Origen
     place: str
+    destination_iata: str
     origin: str
+    origin_iata: str
 
     # Fechas (ISO 8601: YYYY-MM-DD)
     arrival_date: str
@@ -25,6 +27,9 @@ class Context(TypedDict, total=False):
     flights: list | None
     hotels: list | None
     activities: list | None
+
+    # Estrategia de ruta decidida por el agente estratega
+    route_strategy: dict | None
 
     # Itinerario opcional (para uso futuro)
     itinerary: str | None

@@ -1,13 +1,65 @@
-from datetime import date
+from datetime import date, datetime
 import logging
 
 from agent.state import Context
 from agent.tools import search_flights, search_hotels, get_activities, calc_budget
-from agent.model import model
+from agent.model import model, route_strategist, RouteStrategy
 
 from langchain.messages import SystemMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# Route Strategy Node (The Strategist)
+# =========================================================
+
+def route_strategy_node(state: Context) -> dict:
+    """Agente estratega: analiza origen/destino y decide si conviene vuelo directo o self-transfer."""
+    
+    origin = state.get("origin_iata") or state.get("origin", "?")
+    destination = state.get("destination_iata") or state.get("place", "?")
+    arrival_date = state.get("arrival_date", "?")
+
+    system_prompt = """
+        Eres un experto en Travel Hacking y optimización de rutas aéreas.
+        Tu única misión es analizar si la ruta de origen a destino se puede hacer
+        MÁS BARATA comprando dos boletos sencillos independientes (Self-Transfer)
+        en vez de un vuelo directo o con escala de una sola aerolínea.
+
+        Reglas de decisión:
+        1. Si la distancia es corta (vuelo doméstico < 3 horas, ej. MTY-GDL, MTY-MEX), usa strategy='Direct'.
+        2. Si es internacional a destinos cercanos (México-USA, México-Centroamérica), usa strategy='Direct'.
+        3. Si el vuelo es intercontinental o de muy larga distancia (México a Asia, Europa, Oceanía, África),
+           SIEMPRE evalúa la opción 'SelfTransfer'. El usuario quiere saber la forma MÁS BARATA,
+           y comprar dos sencillos cruzando aerolíneas low-cost suele ser 40-60% más barato.
+        4. Para ir a Asia desde México, los hubs ideales son: LAX (Los Ángeles), SFO (San Francisco), YVR (Vancouver).
+        5. Para ir a Europa desde México, los hubs ideales son: MAD (Madrid), JFK (Nueva York), MIA (Miami).
+        6. Para ir a Oceanía desde México, los hubs son: LAX (Los Ángeles), SYD (Sydney vía LAX).
+        7. Propón máximo 2 hubs a evaluar para no desperdiciar créditos de API.
+        8. Sé explícito en tu razonamiento sobre por qué es más barato el self-transfer.
+    """
+    
+    user_message = f"""Analiza esta ruta:
+    - Origen IATA: {origin}
+    - Destino IATA: {destination}
+    - Fecha de salida: {arrival_date}
+    
+    ¿Debo buscar vuelo directo o self-transfer para optimizar el costo?"""
+    
+    try:
+        strategy: RouteStrategy = route_strategist.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ])
+        logger.info(f"ROUTE STRATEGY: {strategy.strategy} | Hubs: {[h.iata for h in strategy.hubs]} | Intl: {strategy.is_international}")
+        logger.info(f"STRATEGY REASONING: {strategy.reasoning}")
+        return {"route_strategy": strategy.model_dump()}
+    except Exception as e:
+        logger.error(f"Error en route_strategy_node: {e}")
+        # Fallback: buscar directo
+        return {"route_strategy": {"strategy": "Direct", "hubs": [], "reasoning": "Fallback", "is_international": False}}
+
 
 def flight_node(state: Context) -> dict:
     logger.debug(f"FLIGHT NODE STATE: {state}")
@@ -20,38 +72,113 @@ def flight_node(state: Context) -> dict:
             ]
         }
 
-    # Validar que la fecha no sea pasada
     if date.fromisoformat(state["arrival_date"]) < date.today():
-        return {
-            "messages": [AIMessage(content="La fecha de salida ya pasó. ¿Cuándo quieres viajar?")]
-        }
+        return {"messages": [AIMessage(content="La fecha de salida ya pasó. ¿Cuándo quieres viajar?")]}
 
     if not state.get("origin"):
-        return {
-            "messages": [AIMessage(content="¿Desde qué ciudad vas a salir?")]
-        }
+        return {"messages": [AIMessage(content="¿Desde qué ciudad vas a salir?")]}
 
     if not state.get("place"):
-        return {
-            "messages": [AIMessage(content="¿A qué destino quieres viajar?")]
-        }
+        return {"messages": [AIMessage(content="¿A qué destino quieres viajar?")]}
 
-    flights = search_flights.invoke({
-        "passengers": state.get("persons", 1),
-        "origin": state["origin"],
-        "destination": state["place"],
-        "arrival_date": state["arrival_date"],
-        "leave_date": state.get("leave_date"),
-        "type_of_flight": "Redondo" if state.get("leave_date") else "Sencillo",
-    })
-    
-    if not flights:
+    origin_code = state.get("origin_iata") or state.get("origin")
+    destination_code = state.get("destination_iata") or state.get("place")
+    arrival_date = state["arrival_date"]
+    leave_date = state.get("leave_date")
+    passengers = state.get("persons", 1)
+
+    route_strategy = state.get("route_strategy") or {"strategy": "Direct", "hubs": []}
+    strategy = route_strategy.get("strategy", "Direct")
+    hubs = route_strategy.get("hubs", [])
+
+    all_flights = []
+
+    if strategy == "SelfTransfer" and hubs:
+        logger.info(f"FLIGHT NODE: Ejecutando SelfTransfer con hubs: {[h['iata'] for h in hubs]}")
+        
+        for hub in hubs:
+            hub_iata = hub["iata"]
+            hub_city = hub.get("city", hub_iata)
+
+            try:
+                seg1 = search_flights.invoke({
+                    "passengers": passengers, "origin": origin_code,
+                    "destination": hub_iata, "arrival_date": arrival_date,
+                    "leave_date": None, "type_of_flight": "Sencillo",
+                })
+            except Exception as e:
+                logger.error(f"  Error tramo 1 ({origin_code}->{hub_iata}): {e}"); seg1 = []
+
+            try:
+                seg2 = search_flights.invoke({
+                    "passengers": passengers, "origin": hub_iata,
+                    "destination": destination_code, "arrival_date": arrival_date,
+                    "leave_date": None, "type_of_flight": "Sencillo",
+                })
+            except Exception as e:
+                logger.error(f"  Error tramo 2 ({hub_iata}->{destination_code}): {e}"); seg2 = []
+
+            compatible_pairs = []
+            for s1 in (seg1 or []):
+                for s2 in (seg2 or []):
+                    try:
+                        arr_hub = datetime.fromisoformat(s1.arrival_time)
+                        dep_dest = datetime.fromisoformat(s2.departure_time)
+                        diff_hours = (dep_dest - arr_hub).total_seconds() / 3600
+                        if 3 <= diff_hours <= 24:
+                            compatible_pairs.append((s1, s2, diff_hours))
+                    except Exception:
+                        pass
+
+            if compatible_pairs:
+                best = min(compatible_pairs, key=lambda x: x[0].price + x[1].price)
+                s1, s2, wait = best
+                from agent.tools import SearchFlightsResponse
+                all_flights.append(SearchFlightsResponse(
+                    leg_type=f"Ida (via {hub_city}, {wait:.1f}h escala)",
+                    airline=f"{s1.airline} + {s2.airline}",
+                    price=s1.price + s2.price,
+                    duration=f"{s1.duration} + {s2.duration}",
+                    departure_time=s1.departure_time,
+                    arrival_time=s2.arrival_time,
+                    layovers=1
+                ))
+                logger.info(f"  Hub {hub_iata}: MXN ${s1.price + s2.price:.0f} | Espera: {wait:.1f}h")
+            else:
+                logger.info(f"  Hub {hub_iata}: Sin pares compatibles de horarios.")
+
+        if leave_date:
+            try:
+                return_flights = search_flights.invoke({
+                    "passengers": passengers, "origin": destination_code,
+                    "destination": origin_code, "arrival_date": leave_date,
+                    "leave_date": None, "type_of_flight": "Sencillo",
+                })
+                all_flights.extend(return_flights or [])
+            except Exception as e:
+                logger.error(f"Error en vuelo de regreso (SelfTransfer): {e}")
+
+        if not all_flights:
+            logger.info("SelfTransfer sin resultados. Fallback a vuelo directo.")
+            strategy = "Direct"
+
+    if strategy == "Direct":
+        logger.info(f"FLIGHT NODE: Estrategia Directa ({origin_code} -> {destination_code})")
+        direct_flights = search_flights.invoke({
+            "passengers": passengers, "origin": origin_code,
+            "destination": destination_code, "arrival_date": arrival_date,
+            "leave_date": leave_date,
+            "type_of_flight": "Redondo" if leave_date else "Sencillo",
+        })
+        all_flights.extend(direct_flights or [])
+
+    if not all_flights:
         return {
             "flights": [],
-            "message": AIMessage(content="No encontré vuelos directos para esa ruta y fecha. Prueba con otras fechas o aerolíneas.")
+            "messages": [AIMessage(content="No encontré vuelos para esa ruta y fecha. Prueba con otras fechas.")]
         }
 
-    return {"flights": flights}
+    return {"flights": all_flights}
 
 
 def hotel_node(state: Context) -> dict:
@@ -102,11 +229,15 @@ def budget_node(state: Context) -> dict:
     hotels = state.get("hotels") or []
     activities = state.get("activities") or []
 
-    # Extraemos precios asegurando que sean float o int
-    flight_prices = [getattr(f, 'price', 0) for f in flights if hasattr(f, 'price')]
-    hotel_prices = [getattr(h, 'price_per_night', 0) for h in hotels if hasattr(h, 'price_per_night')]
+    # Extraer precios de Ida y Regreso de forma independiente
+    ida_prices = [getattr(f, 'price', 0) for f in flights if getattr(f, 'leg_type', '') == 'Ida']
+    regreso_prices = [getattr(f, 'price', 0) for f in flights if getattr(f, 'leg_type', '') == 'Regreso']
     
-    cheapest_flight = min(flight_prices, default=0.0)
+    cheapest_ida = min(ida_prices, default=0.0) if ida_prices else 0.0
+    cheapest_regreso = min(regreso_prices, default=0.0) if regreso_prices else 0.0
+    cheapest_flight = cheapest_ida + cheapest_regreso
+
+    hotel_prices = [getattr(h, 'price_per_night', 0) for h in hotels if hasattr(h, 'price_per_night')]
     cheapest_hotel = min(hotel_prices, default=0.0)
     
     activities_per_person = sum(getattr(a, 'price_per_person', 0) for a in activities)
@@ -194,6 +325,10 @@ def response_node(state: Context) -> dict:
         - Respond in the user's language
         - Use markdown formatting with tables when presenting structured data
         - If some information is missing, mention it clearly but briefly
+        - VERY IMPORTANT: Flights are now provided as separate one-way options with 'leg_type' ("Ida" or "Regreso") and their exact true prices.
+        - You MUST create two distinct markdown tables: one for "Opciones de Ida" and one for "Opciones de Regreso", showing up to the top 3 options for each leg.
+        - The flight tables MUST include a column for 'Escalas' (Layovers) using the new 'layovers' field.
+        - You MUST explicitly tell the user that the budget shown assumes they pick the absolute cheapest combination of flights, but that they have the flexibility to choose any of the other options from the tables based on their preferred schedule.
     """
 
     response = model.invoke([

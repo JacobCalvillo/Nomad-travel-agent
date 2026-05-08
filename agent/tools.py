@@ -16,11 +16,13 @@ from langchain.tools import tool
 
 class SearchFlightsResponse(BaseModel):
     """Resultado de búsqueda de vuelos."""
-    airline: str = Field(description="Nombre de la aerolínea")
-    price: float = Field(default=0.0, description="Precio del vuelo en MXN")
-    duration: str = Field(description="Duración total del vuelo")
-    departure_time: str = Field(description="Hora de salida")
-    arrival_time: str = Field(description="Hora de llegada")
+    leg_type: str = Field(description="Tipo de trayecto ('Ida' o 'Regreso')")
+    airline: str = Field(description="Nombre de la aerolínea (combinadas si hay escalas)")
+    price: float = Field(default=0.0, description="Precio del trayecto en MXN")
+    duration: str = Field(description="Duración total del viaje")
+    departure_time: str = Field(description="Hora de salida (origen inicial)")
+    arrival_time: str = Field(description="Hora de llegada (destino final)")
+    layovers: int = Field(default=0, description="Cantidad de escalas")
 
 
 class GetActivitiesResponse(BaseModel):
@@ -43,7 +45,13 @@ class SearchHotelsResponse(BaseModel):
 _airports = airportsdata.load("IATA")
 
 
+import unicodedata
+
 def _get_airport_code(city: str) -> str:
+    city_clean = city.upper().strip()
+    if len(city_clean) == 3 and city_clean in _airports:
+        return city_clean
+
     city_lower = city.lower().strip()
 
     for code, airport in _airports.items():
@@ -85,12 +93,12 @@ def search_flights(
 
     print(f"SEARCH_FLIGHTS: {origin} ({departure_code}) → {destination} ({arrival_code})")
 
-    params = {
+    params_outbound = {
         "engine": "google_flights",
         "departure_id": departure_code,
         "arrival_id": arrival_code,
         "currency": "MXN",
-        "type": type_code,
+        "type": "2",  # Sencillo
         "outbound_date": arrival_date.isoformat(),
         "api_key": os.getenv("SER_API_API_KEY"),
         "adults": passengers,
@@ -99,40 +107,61 @@ def search_flights(
         "hl": "es"
     }
 
-    if leave_date:
-        params["return_date"] = leave_date.isoformat()
-
-    try:
-        r = httpx.get("https://serpapi.com/search", params=params, timeout=15.0)
-        r.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        print(f"SERPAPI ERROR: {e.response.status_code} — {e.response.text}")
-        raise
-
-    response = r.json()
-
-    # SerpAPI a veces retorna other_flights en lugar de best_flights
-    raw = response.get("best_flights") or response.get("other_flights", [])
-
-    if not raw:
-        print("SERPAPI: sin resultados →", list(response.keys()))
-        return []
-
     flights: list[SearchFlightsResponse] = []
 
-    for option in raw:
-        first_leg = option["flights"][0]
-        flights.append(
-            SearchFlightsResponse(
-                airline=first_leg["airline"],
-                price=float(option["price"]),
-                duration=f"{option['total_duration']} min",
-                departure_time=first_leg["departure_airport"]["time"],
-                arrival_time=first_leg["arrival_airport"]["time"],
+    try:
+        r_out = httpx.get("https://serpapi.com/search", params=params_outbound, timeout=15.0)
+        r_out.raise_for_status()
+        raw_out = r_out.json().get("best_flights", []) or r_out.json().get("other_flights", [])
+        
+        for option in raw_out[:3]:  # Top 3 de Ida
+            first_leg = option["flights"][0]
+            last_leg = option["flights"][-1]
+            airline = first_leg["airline"] if len(option["flights"]) == 1 else f"{first_leg['airline']} (Múltiples)"
+            flights.append(
+                SearchFlightsResponse(
+                    leg_type="Ida",
+                    airline=airline,
+                    price=float(option.get("price", 0)),
+                    duration=f"{option.get('total_duration', 0)} min",
+                    departure_time=first_leg.get("departure_airport", {}).get("time", ""),
+                    arrival_time=last_leg.get("arrival_airport", {}).get("time", ""),
+                    layovers=len(option.get("layovers", []))
+                )
             )
-        )
+    except Exception as e:
+        print(f"Error en vuelo de ida: {e}")
 
-    print(f"FLIGHTS encontrados: {len(flights)}")
+    if leave_date:
+        params_inbound = params_outbound.copy()
+        params_inbound["departure_id"] = arrival_code
+        params_inbound["arrival_id"] = departure_code
+        params_inbound["outbound_date"] = leave_date.isoformat()
+        
+        try:
+            r_in = httpx.get("https://serpapi.com/search", params=params_inbound, timeout=15.0)
+            r_in.raise_for_status()
+            raw_in = r_in.json().get("best_flights", []) or r_in.json().get("other_flights", [])
+            
+            for option in raw_in[:3]:  # Top 3 de Regreso
+                first_leg = option["flights"][0]
+                last_leg = option["flights"][-1]
+                airline = first_leg["airline"] if len(option["flights"]) == 1 else f"{first_leg['airline']} (Múltiples)"
+                flights.append(
+                    SearchFlightsResponse(
+                        leg_type="Regreso",
+                        airline=airline,
+                        price=float(option.get("price", 0)),
+                        duration=f"{option.get('total_duration', 0)} min",
+                        departure_time=first_leg.get("departure_airport", {}).get("time", ""),
+                        arrival_time=last_leg.get("arrival_airport", {}).get("time", ""),
+                        layovers=len(option.get("layovers", []))
+                    )
+                )
+        except Exception as e:
+            print(f"Error en vuelo de regreso: {e}")
+
+    print(f"FLIGHTS encontrados: {len(flights)} (Top 3 por trayecto)")
     return flights
 
 
