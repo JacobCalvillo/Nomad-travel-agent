@@ -1,13 +1,12 @@
 import os
 import httpx
-from dotenv import load_dotenv
-load_dotenv()
-
 from datetime import date
-
 import airportsdata
 
 from pydantic import BaseModel, Field
+
+from agent.model import model
+from langchain.messages import SystemMessage, HumanMessage
 from langchain.tools import tool
 
 
@@ -185,8 +184,6 @@ def search_hotels(
         currency = response.get("search_parameters", {}).get("currency", "USD")
         if currency == "USD":
             price = price * 17.5  
-            
-            
     
         hotels.append(
             SearchHotelsResponse(
@@ -202,34 +199,72 @@ def search_hotels(
     return hotels
 
 
+class ActivityPriceEstimate(BaseModel):
+    name: str = Field(description="Nombre de la actividad")
+    estimated_price_mxn: float = Field(description="Costo estimado de entrada en MXN")
+
+class ActivityPrices(BaseModel):
+    prices: list[ActivityPriceEstimate]
+
 @tool("get_activities", description="Obtiene actividades turísticas disponibles en el destino.")
 def get_activities(place: str) -> list[GetActivitiesResponse]:
-    """
-    TODO: conectar a API de actividades
-    """
-    return [
-        GetActivitiesResponse(
-            name="Tour Monte Albán",
-            price_per_person=350.0,
-            duration="4h",
-            category="cultural",
-            description=f"Visita guiada a la zona arqueológica cercana a {place}.",
-        ),
-        GetActivitiesResponse(
-            name="Clase de cocina local",
-            price_per_person=600.0,
-            duration="3h",
-            category="gastronomía",
-            description=f"Aprende a preparar platillos típicos de {place}.",
-        ),
-        GetActivitiesResponse(
-            name="Recorrido por mercado local",
-            price_per_person=0.0,
-            duration="2h",
-            category="free",
-            description=f"Explora el mercado principal de {place} con guía.",
-        ),
-    ]
+    params = {
+        "engine": "google_local",
+        "q": f"Things to do in {place}",
+        "api_key": os.getenv("SER_API_API_KEY"),
+        "hl": "es",
+        "gl": "mx"
+    }
+
+    try:
+        r = httpx.get("https://serpapi.com/search", params=params, timeout=15.0)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        print(f"SERPAPI ERROR actividades: {e.response.status_code} — {e.response.text}")
+        return []
+
+    data = r.json()
+    local_results = data.get("local_results", [])[:5]
+    activities: list[GetActivitiesResponse] = []
+    
+    if not local_results:
+        return activities
+
+    # 1. Preparar nombres para el LLM
+    names = [item.get("title", "") for item in local_results]
+
+    # 2. Estimación de precios con LLM
+    estimator = model.with_structured_output(ActivityPrices)
+    system_prompt = "Estima el precio de entrada estándar por adulto en MXN para las siguientes atracciones turísticas. Si es una plaza, parque público, mercado o iglesia, el costo es 0. Responde solo con los datos."
+    human_prompt = "Atracciones: " + ", ".join(names)
+    
+    price_map = {}
+    try:
+        estimation = estimator.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ])
+        price_map = {p.name.lower(): p.estimated_price_mxn for p in estimation.prices}
+    except Exception as e:
+        print(f"Error al estimar precios: {e}")
+
+    # 3. Ensamblar la respuesta
+    for item in local_results:
+        title = item.get("title", "Sin nombre")
+        price = price_map.get(title.lower(), 0.0)
+        
+        activities.append(
+            GetActivitiesResponse(
+                name=title,
+                price_per_person=price,
+                duration="N/A",
+                category=item.get("type", "Atracción"),
+                description=f"{item.get('address', '')} (Calificación: {item.get('rating', 'N/A')} con {item.get('reviews', 0)} reseñas)",
+            )
+        )
+
+    print(f"ACTIVITIES encontradas y estimadas: {len(activities)}")
+    return activities
 
 
 @tool("calc_budget", description="Calcula el presupuesto total del viaje.")

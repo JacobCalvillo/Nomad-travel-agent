@@ -2,3 +2,5 @@
 .env
 __pycache__
 travel_agent.log
+.cursor
+.cursor

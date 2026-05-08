@@ -1,13 +1,6 @@
-from typing import Annotated, TYPE_CHECKING
+from typing import Annotated
+import operator
 from langgraph.graph.message import add_messages
-
-if TYPE_CHECKING:
-    from agent.tools import (
-        SearchFlightsResponse,
-        SearchHotelsResponse,
-        GetActivitiesResponse,
-    )
-
 
 from typing import TypedDict
 
@@ -43,6 +36,16 @@ class Context(TypedDict, total=False):
 
     # Presupuesto calculado
     budget_total: float | None
+    
+    needs_clarification: Annotated[
+        bool,
+        lambda a, b: a or b
+    ]
+
+    clarification_messages: Annotated[
+        list[str],
+        operator.add
+    ]
 
     # Historial de mensajes (LangGraph lo gestiona con add_messages)
     messages: Annotated[list, add_messages]

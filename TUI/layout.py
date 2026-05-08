@@ -39,8 +39,8 @@ class TravelAgentApp(App):
     # =====================================================
 
     def scroll_to_bottom(self):
-        chat = self.query_one("#chat-container")
-        chat.scroll_end(animate=False)
+        container = self.query_one("#chat-container")
+        container.call_after_refresh(container.scroll_end, animate=True)
 
     def add_message(self, message: str, role: str = "assistant"):
         """Método genérico para añadir mensajes al chat."""
@@ -111,70 +111,90 @@ class TravelAgentApp(App):
             "response_node": "Preparando respuesta...",
         }
 
-        pending_history = [*self.history, HumanMessage(message)]
+        # 1. Preparamos el historial actual incluyendo el mensaje del usuario
+        current_human_msg = HumanMessage(content=message)
+        pending_history = [*self.history, current_human_msg]
 
         input_state = {
             **self.agent_state,
+            "needs_clarification": False,
+            "clarification_messages": [],
             "messages": pending_history,
         }
 
-        # Acumula el estado de todos los nodos durante el stream
+        # Acumuladores
         accumulated_state: dict = {**self.agent_state}
         last_ai_message: str | None = None
 
         try:
+            # 2. Streaming del agente
             for chunk in agent.stream(input_state, stream_mode="updates"):
-                node_name = list(chunk.keys())[0]
-                node_data = chunk[node_name]
+                # IMPORTANTE: Validar que el chunk sea un diccionario
+                if not isinstance(chunk, dict):
+                    continue
 
-                # Mostrar status del nodo actual
-                status = NODE_MESSAGES.get(node_name)
-                if status and status != self.last_status:
-                    self.last_status = status
-                    self.call_from_thread(self.add_status_message, status)
-
-                # Merge incremental del estado — nunca sobreescribir con None
-                for k, v in node_data.items():
-                    if k == "messages":
+                for node_name, node_data in chunk.items():
+                    # FIX: Validar que node_data no sea None
+                    if node_data is None:
+                        logger.debug(f"Nodo {node_name} envió data vacía (None)")
                         continue
-                    if v is not None:
+
+                    # Actualizar estado visual (Status)
+                    status = NODE_MESSAGES.get(node_name)
+                    if status and status != self.last_status:
+                        self.last_status = status
+                        self.call_from_thread(self.add_status_message, status)
+
+                    # 3. Mezcla incremental de datos
+                    # Usamos .get() por seguridad
+                    for k, v in node_data.items():
+                        if k == "messages" or v is None:
+                            continue
                         accumulated_state[k] = v
 
-                # Capturar el último AIMessage generado
-                messages = node_data.get("messages", [])
-                if messages:
-                    last_msg = messages[-1]
-                    if isinstance(last_msg, AIMessage) and last_msg.content:
-                        last_ai_message = last_msg.content
-
+                    # 4. Captura el mensaje de respuesta
+                    messages = node_data.get("messages", [])
+                    if messages:
+                        ai_msgs = [m for m in messages if isinstance(m, AIMessage)]
+                        if ai_msgs:
+                            content = ai_msgs[-1].content
+                            # SEGURIDAD: Si el contenido es una lista (multimodal/tools), 
+                            # extraer solo el texto
+                            if isinstance(content, list):
+                                text_parts = [
+                                    part.get("text", "") if isinstance(part, dict) else str(part)
+                                    for part in content
+                                ]
+                                last_ai_message = "".join(text_parts)
+                            else:
+                                last_ai_message = content
+            # 5. Validación de respuesta
             if last_ai_message is None:
-                self.call_from_thread(
-                    self.add_assistant_message,
-                    "No pude generar una respuesta. Intenta de nuevo."
-                )
-                return
+                return 
 
-            # Limpiar tags <think> de modelos como DeepSeek/Qwen
-            response = re.sub(
-                r"<think>.*?</think>", "", last_ai_message, flags=re.DOTALL
-            ).strip()
+            # Limpiar tags de razonamiento (DeepSeek/Qwen)
+            response = re.sub(r"<think>.*?</think>", "", str(last_ai_message), flags=re.DOTALL).strip()
 
-            # Persistir estado limpio (sin messages) para el siguiente turno
+            # 6. PERSISTENCIA CRÍTICA:
+            # Actualizamos el estado global de la App para el siguiente turno
             self.agent_state = {
                 k: v for k, v in accumulated_state.items()
                 if k != "messages"
             }
 
-            # Actualizar historial con el turno completo
-            self.history = pending_history + [AIMessage(content=response)]
+            # Actualizamos el historial real de la conversación
+            self.history.append(current_human_msg)
+            self.history.append(AIMessage(content=response))
 
+            # Mostramos la respuesta en la UI
             self.call_from_thread(self.add_assistant_message, response)
 
-        except Exception:
-            traceback.print_exc()
+        except Exception as e:
+            # Loguear el error real para debug
+            logger.error(f"Error en run_agent: {traceback.format_exc()}")
             self.call_from_thread(
                 self.add_assistant_message,
-                "Lo siento, ocurrió un error procesando tu solicitud. Intenta de nuevo."
+                f"Lo siento, ocurrió un error: {str(e)}" 
             )
 
         finally:
